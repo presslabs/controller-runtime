@@ -105,15 +105,18 @@ func referSameObject(a, b v1.OwnerReference) bool {
 // OperationType is the action result of a CreateOrUpdate call
 type OperationType string
 
-const ( // They should complete the sentence "v1.Deployment has been ..."
-	OperationNoop    = "unchanged"
+const ( // They should complete the sentence "Deployment default/foo has been ..."
+	// OperationNoop means that the resource has not been changed
+	OperationNoop = "unchanged"
+	// OperationCreated means that a new resource has been created
 	OperationCreated = "created"
+	// OperationUpdated means that an existing resource has been updated
 	OperationUpdated = "updated"
 )
 
 // CreateOrUpdate creates or updates a kuberenes resource. It takes in a key and
 // a placeholder for the existing object and returns the modified object
-func CreateOrUpdate(c client.Client, ctx context.Context, key client.ObjectKey, existing runtime.Object, t TransformFn) (runtime.Object, OperationType, error) {
+func CreateOrUpdate(ctx context.Context, c client.Client, key client.ObjectKey, existing runtime.Object, t TransformFn) (runtime.Object, OperationType, error) {
 	err := c.Get(ctx, key, existing)
 	var obj runtime.Object
 
@@ -124,11 +127,11 @@ func CreateOrUpdate(c client.Client, ctx context.Context, key client.ObjectKey, 
 		}
 
 		err = c.Create(ctx, obj)
+
 		if err != nil {
 			return nil, OperationNoop, err
-		} else {
-			return obj, OperationCreated, err
 		}
+		return obj, OperationCreated, err
 	} else if err != nil {
 		return nil, OperationNoop, err
 	} else {
@@ -141,12 +144,10 @@ func CreateOrUpdate(c client.Client, ctx context.Context, key client.ObjectKey, 
 			err = c.Update(ctx, obj)
 			if err != nil {
 				return nil, OperationNoop, err
-			} else {
-				return obj, OperationUpdated, err
 			}
-		} else {
-			return obj, OperationNoop, nil
+			return obj, OperationUpdated, err
 		}
+		return obj, OperationNoop, nil
 	}
 }
 
