@@ -17,11 +17,15 @@ limitations under the License.
 package controllerutil
 
 import (
+	"context"
 	"fmt"
+	"reflect"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 )
 
@@ -97,3 +101,55 @@ func referSameObject(a, b v1.OwnerReference) bool {
 
 	return aGV == bGV && a.Kind == b.Kind && a.Name == b.Name
 }
+
+// OperationType is the action result of a CreateOrUpdate call
+type OperationType string
+
+const ( // They should complete the sentence "v1.Deployment has been ..."
+	OperationNoop    = "unchanged"
+	OperationCreated = "created"
+	OperationUpdated = "updated"
+)
+
+// CreateOrUpdate creates or updates a kuberenes resource. It takes in a key and
+// a placeholder for the existing object and returns the modified object
+func CreateOrUpdate(c client.Client, ctx context.Context, key client.ObjectKey, existing runtime.Object, t TransformFn) (runtime.Object, OperationType, error) {
+	err := c.Get(ctx, key, existing)
+	var obj runtime.Object
+
+	if errors.IsNotFound(err) {
+		obj, err = t(existing)
+		if err != nil {
+			return nil, OperationNoop, err
+		}
+
+		err = c.Create(ctx, obj)
+		if err != nil {
+			return nil, OperationNoop, err
+		} else {
+			return obj, OperationCreated, err
+		}
+	} else if err != nil {
+		return nil, OperationNoop, err
+	} else {
+		obj, err = t(existing.DeepCopyObject())
+		if err != nil {
+			return nil, OperationNoop, err
+		}
+
+		if !reflect.DeepEqual(existing, obj) {
+			err = c.Update(ctx, obj)
+			if err != nil {
+				return nil, OperationNoop, err
+			} else {
+				return obj, OperationUpdated, err
+			}
+		} else {
+			return obj, OperationNoop, nil
+		}
+	}
+}
+
+// TransformFn is a function which take in a kubernetes object and returns the
+// desired state of that object
+type TransformFn func(in runtime.Object) (runtime.Object, error)
