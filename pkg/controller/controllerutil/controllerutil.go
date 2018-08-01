@@ -114,43 +114,62 @@ const ( // They should complete the sentence "Deployment default/foo has been ..
 	OperationUpdated = "updated"
 )
 
-// CreateOrUpdate creates or updates a kuberenes resource. It takes in a key and
-// a placeholder for the existing object and returns the modified object
-func CreateOrUpdate(ctx context.Context, c client.Client, key client.ObjectKey, existing runtime.Object, t TransformFn) (runtime.Object, OperationType, error) {
+// CreateOrUpdate creates or updates a kubernetes resource. It takes in a key and
+// a placeholder for the existing object and returns the operation executed
+func CreateOrUpdate(ctx context.Context, c client.Client, key client.ObjectKey, existing runtime.Object, t TransformFn) (OperationType, error) {
 	err := c.Get(ctx, key, existing)
 	var obj runtime.Object
 
 	if errors.IsNotFound(err) {
-		obj, err = t(existing)
+		// Create a new zero value object so that the in parameter of
+		// TransformFn is always a "clean" object, with only Name and Namespace
+		// set
+		zero := reflect.New(reflect.TypeOf(existing).Elem()).Interface()
+
+		// Set Namespace and Name from the lookup key
+		zmeta, ok := zero.(v1.Object)
+		if !ok {
+			return OperationNoop, fmt.Errorf("is not a %T a metav1.Object, cannot call CreateOrUpdate", zero)
+		}
+		zmeta.SetNamespace(key.Namespace)
+		zmeta.SetName(key.Name)
+
+		// Apply the TransformFn
+		obj, err = t(zero.(runtime.Object))
 		if err != nil {
-			return nil, OperationNoop, err
+			return OperationNoop, err
 		}
 
+		// Create the new object
 		err = c.Create(ctx, obj)
-
 		if err != nil {
-			return nil, OperationNoop, err
+			return OperationNoop, err
 		}
-		return obj, OperationCreated, err
+
+		return OperationCreated, err
 	} else if err != nil {
-		return nil, OperationNoop, err
+		return OperationNoop, err
 	} else {
 		obj, err = t(existing.DeepCopyObject())
 		if err != nil {
-			return nil, OperationNoop, err
+			return OperationNoop, err
 		}
 
 		if !reflect.DeepEqual(existing, obj) {
 			err = c.Update(ctx, obj)
 			if err != nil {
-				return nil, OperationNoop, err
+				return OperationNoop, err
 			}
-			return obj, OperationUpdated, err
+
+			return OperationUpdated, err
 		}
-		return obj, OperationNoop, nil
+
+		return OperationNoop, nil
 	}
 }
 
 // TransformFn is a function which take in a kubernetes object and returns the
-// desired state of that object
+// desired state of that object.
+// It is safe to mutate the object inside this function, since it's always
+// called with an object's deep copy.
 type TransformFn func(in runtime.Object) (runtime.Object, error)

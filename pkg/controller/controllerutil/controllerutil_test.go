@@ -1,12 +1,16 @@
 package controllerutil_test
 
 import (
+	"context"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -92,10 +96,94 @@ var _ = Describe("Controllerutil", func() {
 			}))
 		})
 	})
+
+	Describe("CreateOrUpdate", func() {
+
+		It("creates a new object if one doesn't exists", func() {
+			deplKey := types.NamespacedName{Name: "test-create", Namespace: "default"}
+			depl := &appsv1.Deployment{}
+
+			op, err := controllerutil.CreateOrUpdate(context.TODO(), c, deplKey, depl, createDeployment)
+
+			By("returning OperationCreated")
+			Expect(op).Should(BeEquivalentTo(controllerutil.OperationCreated))
+
+			By("returning returning no error")
+			Expect(err).ShouldNot(HaveOccurred())
+
+			By("actually having the deployment created")
+			fetched := &appsv1.Deployment{}
+			Expect(c.Get(context.TODO(), deplKey, fetched)).Should(Succeed())
+		})
+
+		It("update existing object", func() {
+			deplKey := types.NamespacedName{Name: "test-update", Namespace: "default"}
+			d, _ := createDeployment(&appsv1.Deployment{})
+			depl := d.(*appsv1.Deployment)
+			depl.Name = "test-update"
+			depl.Namespace = "default"
+
+			var scale int32 = 2
+
+			Expect(c.Create(context.TODO(), depl)).Should(Succeed())
+
+			op, err := controllerutil.CreateOrUpdate(context.TODO(), c, deplKey, &appsv1.Deployment{}, deploymentScaler(scale))
+
+			By("returning OperationUpdated")
+			Expect(op).Should(BeEquivalentTo(controllerutil.OperationUpdated))
+
+			By("returning returning no error")
+			Expect(err).ShouldNot(HaveOccurred())
+
+			By("actually having the deployment scaled")
+			fetched := &appsv1.Deployment{}
+			Expect(c.Get(context.TODO(), deplKey, fetched)).Should(Succeed())
+			Expect(*fetched.Spec.Replicas).To(Equal(scale))
+		})
+
+		It("updates only changed objects", func() {
+			deplKey := types.NamespacedName{Name: "test-idempotency", Namespace: "default"}
+			depl := &appsv1.Deployment{}
+
+			op, err := controllerutil.CreateOrUpdate(context.TODO(), c, deplKey, depl, createDeployment)
+			Expect(op).Should(BeEquivalentTo(controllerutil.OperationCreated))
+			Expect(err).ShouldNot(HaveOccurred())
+
+			op, err = controllerutil.CreateOrUpdate(context.TODO(), c, deplKey, depl, deploymentIdentity)
+
+			By("returning OperationNoop")
+			Expect(op).Should(BeEquivalentTo(controllerutil.OperationNoop))
+
+			By("returning returning no error")
+			Expect(err).ShouldNot(HaveOccurred())
+		})
+	})
 })
 
 var _ metav1.Object = &errMetaObj{}
 
 type errMetaObj struct {
 	metav1.ObjectMeta
+}
+
+var createDeployment controllerutil.TransformFn = func(in runtime.Object) (runtime.Object, error) {
+	out := in.(*appsv1.Deployment)
+	out.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}}
+	out.Spec.Template.ObjectMeta.Labels = map[string]string{"foo": "bar"}
+	out.Spec.Template.Spec.Containers = []corev1.Container{corev1.Container{Name: "foo", Image: "busybox"}}
+	return out, nil
+}
+
+var deploymentIdentity controllerutil.TransformFn = func(in runtime.Object) (runtime.Object, error) {
+	return in, nil
+}
+
+func deploymentScaler(replicas int32) controllerutil.TransformFn {
+	fn := func(in runtime.Object) (runtime.Object, error) {
+		d, _ := createDeployment(in)
+		out := d.(*appsv1.Deployment)
+		out.Spec.Replicas = &replicas
+		return out, nil
+	}
+	return fn
 }
