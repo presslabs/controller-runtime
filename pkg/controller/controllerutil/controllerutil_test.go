@@ -2,6 +2,8 @@ package controllerutil_test
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -98,17 +100,49 @@ var _ = Describe("Controllerutil", func() {
 	})
 
 	Describe("CreateOrUpdate", func() {
+		var deploy *appsv1.Deployment
+		var deplKey types.NamespacedName
+
+		BeforeEach(func() {
+			deploy = &appsv1.Deployment{
+				Spec: appsv1.DeploymentSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"foo": "bar"},
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{
+								"foo": "bar",
+							},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								corev1.Container{
+									Name:  "foo",
+									Image: "busybox",
+								},
+							},
+						},
+					},
+				},
+			}
+
+			deploy.Name = fmt.Sprintf("deploy-%d", rand.Int31())
+			deploy.Namespace = "default"
+
+			deplKey = types.NamespacedName{
+				Name:      deploy.Name,
+				Namespace: deploy.Namespace,
+			}
+		})
 
 		It("creates a new object if one doesn't exists", func() {
-			deplKey := types.NamespacedName{Name: "test-create", Namespace: "default"}
-			depl := &appsv1.Deployment{}
-
-			op, err := controllerutil.CreateOrUpdate(context.TODO(), c, deplKey, depl, createDeployment)
+			op, err := controllerutil.CreateOrUpdate(context.TODO(), c, deploy)
 
 			By("returning OperationCreated")
-			Expect(op).Should(BeEquivalentTo(controllerutil.OperationCreated))
+			Expect(op).To(BeEquivalentTo(controllerutil.OperationCreate))
 
-			By("returning returning no error")
+			By("returning no error")
 			Expect(err).ShouldNot(HaveOccurred())
 
 			By("actually having the deployment created")
@@ -117,22 +151,15 @@ var _ = Describe("Controllerutil", func() {
 		})
 
 		It("update existing object", func() {
-			deplKey := types.NamespacedName{Name: "test-update", Namespace: "default"}
-			d, _ := createDeployment(&appsv1.Deployment{})
-			depl := d.(*appsv1.Deployment)
-			depl.Name = "test-update"
-			depl.Namespace = "default"
-
 			var scale int32 = 2
+			Expect(c.Create(context.TODO(), deploy)).Should(Succeed())
 
-			Expect(c.Create(context.TODO(), depl)).Should(Succeed())
-
-			op, err := controllerutil.CreateOrUpdate(context.TODO(), c, deplKey, &appsv1.Deployment{}, deploymentScaler(scale))
+			op, err := controllerutil.CreateOrUpdate(context.TODO(), c, deploy, deploymentScaler(scale))
 
 			By("returning OperationUpdated")
-			Expect(op).Should(BeEquivalentTo(controllerutil.OperationUpdated))
+			Expect(op).Should(BeEquivalentTo(controllerutil.OperationUpdate))
 
-			By("returning returning no error")
+			By("returning no error")
 			Expect(err).ShouldNot(HaveOccurred())
 
 			By("actually having the deployment scaled")
@@ -142,20 +169,45 @@ var _ = Describe("Controllerutil", func() {
 		})
 
 		It("updates only changed objects", func() {
-			deplKey := types.NamespacedName{Name: "test-idempotency", Namespace: "default"}
-			depl := &appsv1.Deployment{}
+			op, err := controllerutil.CreateOrUpdate(context.TODO(), c, deploy)
 
-			op, err := controllerutil.CreateOrUpdate(context.TODO(), c, deplKey, depl, createDeployment)
-			Expect(op).Should(BeEquivalentTo(controllerutil.OperationCreated))
+			Expect(op).Should(BeEquivalentTo(controllerutil.OperationCreate))
 			Expect(err).ShouldNot(HaveOccurred())
 
-			op, err = controllerutil.CreateOrUpdate(context.TODO(), c, deplKey, depl, deploymentIdentity)
+			op, err = controllerutil.CreateOrUpdate(context.TODO(), c, deploy, deploymentIdentity)
 
 			By("returning OperationNoop")
 			Expect(op).Should(BeEquivalentTo(controllerutil.OperationNoop))
 
-			By("returning returning no error")
+			By("returning no error")
 			Expect(err).ShouldNot(HaveOccurred())
+		})
+
+		It("allows chaining transforms", func() {
+			scaleToTwo := deploymentScaler(2)
+			scaleToThree := deploymentScaler(3)
+
+			op, err := controllerutil.CreateOrUpdate(context.TODO(), c, deploy, scaleToTwo, scaleToThree)
+
+			Expect(op).Should(BeEquivalentTo(controllerutil.OperationCreate))
+			Expect(err).ShouldNot(HaveOccurred())
+
+			By("applying the last scale")
+			fetched := &appsv1.Deployment{}
+			Expect(c.Get(context.TODO(), deplKey, fetched)).Should(Succeed())
+			Expect(*fetched.Spec.Replicas).To(Equal(int32(3)))
+		})
+
+		It("doesn't mutate the desired object", func() {
+			scaleToTwo := deploymentScaler(2)
+			scaleToThree := deploymentScaler(3)
+
+			op, err := controllerutil.CreateOrUpdate(context.TODO(), c, deploy, scaleToTwo, scaleToThree)
+
+			Expect(op).Should(BeEquivalentTo(controllerutil.OperationCreate))
+			Expect(err).ShouldNot(HaveOccurred())
+
+			Expect(deploy.Spec.Replicas).To(BeNil())
 		})
 	})
 })
@@ -166,24 +218,16 @@ type errMetaObj struct {
 	metav1.ObjectMeta
 }
 
-var createDeployment controllerutil.TransformFn = func(in runtime.Object) (runtime.Object, error) {
-	out := in.(*appsv1.Deployment)
-	out.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}}
-	out.Spec.Template.ObjectMeta.Labels = map[string]string{"foo": "bar"}
-	out.Spec.Template.Spec.Containers = []corev1.Container{corev1.Container{Name: "foo", Image: "busybox"}}
-	return out, nil
+var deploymentIdentity controllerutil.ReconcileFn = func(obj, existing runtime.Object) error {
+	existing.(*appsv1.Deployment).DeepCopyInto(obj.(*appsv1.Deployment))
+	return nil
 }
 
-var deploymentIdentity controllerutil.TransformFn = func(in runtime.Object) (runtime.Object, error) {
-	return in, nil
-}
-
-func deploymentScaler(replicas int32) controllerutil.TransformFn {
-	fn := func(in runtime.Object) (runtime.Object, error) {
-		d, _ := createDeployment(in)
-		out := d.(*appsv1.Deployment)
+func deploymentScaler(replicas int32) controllerutil.ReconcileFn {
+	fn := func(obj, existing runtime.Object) error {
+		out := obj.(*appsv1.Deployment)
 		out.Spec.Replicas = &replicas
-		return out, nil
+		return nil
 	}
 	return fn
 }

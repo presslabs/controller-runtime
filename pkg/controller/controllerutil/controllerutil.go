@@ -108,68 +108,80 @@ type OperationType string
 const ( // They should complete the sentence "Deployment default/foo has been ..."
 	// OperationNoop means that the resource has not been changed
 	OperationNoop = "unchanged"
-	// OperationCreated means that a new resource has been created
-	OperationCreated = "created"
-	// OperationUpdated means that an existing resource has been updated
-	OperationUpdated = "updated"
+	// OperationCreate means that a new resource is created
+	OperationCreate = "created"
+	// OperationUpdate means that an existing resource is updated
+	OperationUpdate = "updated"
 )
 
-// CreateOrUpdate creates or updates a kubernetes resource. It takes in a key and
-// a placeholder for the existing object and returns the operation executed
-func CreateOrUpdate(ctx context.Context, c client.Client, key client.ObjectKey, existing runtime.Object, t TransformFn) (OperationType, error) {
-	err := c.Get(ctx, key, existing)
+// CreateOrUpdate creates or updates a kubernetes resource. It takes in a
+// desired object state and an optional list of reconcile functions which
+// reconcile the desired object with the existing state
+func CreateOrUpdate(ctx context.Context, c client.Client, desired runtime.Object, reconciles ...ReconcileFn) (OperationType, error) {
+	// op is the operation we are going to attempt
+	var op OperationType = OperationNoop
+	// obj is the object to be created/updated
 	var obj runtime.Object
 
+	existing, err := getExistingObject(ctx, c, desired)
+
+	// decide about the operation we are going to attempt
 	if errors.IsNotFound(err) {
-		// Create a new zero value object so that the in parameter of
-		// TransformFn is always a "clean" object, with only Name and Namespace
-		// set
-		zero := reflect.New(reflect.TypeOf(existing).Elem()).Interface()
-
-		// Set Namespace and Name from the lookup key
-		zmeta, ok := zero.(v1.Object)
-		if !ok {
-			return OperationNoop, fmt.Errorf("is not a %T a metav1.Object, cannot call CreateOrUpdate", zero)
-		}
-		zmeta.SetNamespace(key.Namespace)
-		zmeta.SetName(key.Name)
-
-		// Apply the TransformFn
-		obj, err = t(zero.(runtime.Object))
-		if err != nil {
-			return OperationNoop, err
-		}
-
-		// Create the new object
-		err = c.Create(ctx, obj)
-		if err != nil {
-			return OperationNoop, err
-		}
-
-		return OperationCreated, err
-	} else if err != nil {
-		return OperationNoop, err
+		op = OperationCreate
+		obj = desired.DeepCopyObject()
+	} else if err == nil {
+		op = OperationUpdate
+		obj = desired.DeepCopyObject()
 	} else {
-		obj, err = t(existing.DeepCopyObject())
+		return OperationNoop, err
+	}
+
+	// reconcile the object with the existing object
+	for _, r := range reconciles {
+		err = r(obj, existing)
 		if err != nil {
 			return OperationNoop, err
 		}
-
-		if !reflect.DeepEqual(existing, obj) {
-			err = c.Update(ctx, obj)
-			if err != nil {
-				return OperationNoop, err
-			}
-
-			return OperationUpdated, err
-		}
-
-		return OperationNoop, nil
 	}
+
+	switch op {
+	case OperationCreate:
+		err = c.Create(ctx, obj)
+	case OperationUpdate:
+		if reflect.DeepEqual(existing, obj) {
+			return OperationNoop, nil
+		}
+		err = c.Update(ctx, obj)
+	default:
+		panic("This should be unreachable")
+	}
+
+	if err != nil {
+		return OperationNoop, err
+	}
+	return op, nil
 }
 
-// TransformFn is a function which take in a kubernetes object and returns the
-// desired state of that object.
-// It is safe to mutate the object inside this function, since it's always
-// called with an object's deep copy.
-type TransformFn func(in runtime.Object) (runtime.Object, error)
+// getExistingObject returns the existing object for the passed in desired
+// object. If there is no existing object, returns an zero value object with the
+// type of desired object
+func getExistingObject(ctx context.Context, c client.Client, desired runtime.Object) (runtime.Object, error) {
+	mo, ok := desired.(v1.Object)
+	if !ok {
+		return nil, fmt.Errorf("%T is not a metav1.Object, cannot call getExistingObject", desired)
+	}
+	key := client.ObjectKey{
+		Name:      mo.GetName(),
+		Namespace: mo.GetNamespace(),
+	}
+
+	existing := reflect.New(reflect.TypeOf(desired).Elem()).Interface().(runtime.Object)
+	err := c.Get(ctx, key, existing)
+
+	return existing, err
+}
+
+// ReconcileFn should mutate the desired object state and reconcile it with the
+// existing object. When there is no existing object, a zero value object of
+// desired object type gets passed in.
+type ReconcileFn func(desired, existing runtime.Object) error
