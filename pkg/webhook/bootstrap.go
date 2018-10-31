@@ -151,7 +151,7 @@ func (s *Server) InstallWebhookManifests() error {
 		return err
 	}
 
-	return batchCreateOrReplace(s.Client, objects...)
+	return batchCreateOrUpdate(s.Client, objects...)
 }
 
 func (s *Server) getClientConfig() (*admissionregistration.WebhookClientConfig, error) {

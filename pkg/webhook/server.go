@@ -263,7 +263,7 @@ func (s *Server) RefreshCert() (bool, error) {
 		return false, err
 	}
 
-	return changed, batchCreateOrReplace(s.Client, s.webhookConfigurations...)
+	return changed, batchCreateOrUpdate(s.Client, s.webhookConfigurations...)
 }
 
 var _ inject.Client = &Server{}
